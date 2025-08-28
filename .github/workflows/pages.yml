@@ -1,0 +1,190 @@
+# .github/workflows/pages.yml
+name: Deploy static site to Pages
+
+
+on:
+push:
+branches: [ main ]
+workflow_dispatch:
+
+
+permissions:
+contents: read
+pages: write
+id-token: write
+
+
+concurrency:
+group: pages
+cancel-in-progress: true
+
+
+jobs:
+build:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout
+uses: actions/checkout@v4
+- name: Configure Pages
+uses: actions/configure-pages@v5
+- name: Upload artifact
+uses: actions/upload-pages-artifact@v3
+with:
+path: frontend
+deploy:
+environment:
+name: github-pages
+url: ${{ steps.deployment.outputs.page_url }}
+runs-on: ubuntu-latest
+needs: build
+steps:
+- name: Deploy to GitHub Pages
+id: deployment
+uses: actions/deploy-pages@v4
+// backend/package.json
+{
+"name": "lap-tracker-api",
+"version": "1.0.0",
+"description": "Backend API for Community Lap Tracker",
+"main": "server.js",
+"type": "commonjs",
+"scripts": {
+"start": "node server.js",
+"dev": "nodemon server.js",
+"setup-db": "node setup-database.js"
+},
+"dependencies": {
+"cors": "^2.8.5",
+"dotenv": "^16.4.5",
+"express": "^4.19.2",
+"pg": "^8.11.5"
+},
+"devDependencies": {
+"nodemon": "^3.1.4"
+},
+"engines": { "node": ">=18.0.0" }
+}
+// backend/server.js
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.post('/api/entries/bulk', async (req, res) => {
+try {
+const admin = req.headers['x-admin-token'] || '';
+if (!process.env.ADMIN_TOKEN || admin !== process.env.ADMIN_TOKEN) return res.status(403).json({ error: 'Forbidden' });
+const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+if (!entries.length) return res.status(400).json({ error: 'No entries' });
+if (entries.length > 2000) return res.status(400).json({ error: 'Too many entries' });
+let count = 0;
+const client = await pool.connect();
+try {
+await client.query('BEGIN');
+for (const raw of entries) {
+const name = (raw.name || raw.swimmer_name || '').toString().trim().slice(0,80);
+const laps = Number(raw.laps);
+const date = raw.date;
+if (!isValidName(name) || !isValidLaps(laps) || !isValidDate(date)) continue;
+await client.query('INSERT INTO entries (swimmer_name, laps, date) VALUES ($1,$2,$3)', [name, laps, date]);
+count++;
+}
+await client.query('COMMIT');
+} catch (e) { await client.query('ROLLBACK'); throw e; }
+finally { client.release(); }
+res.json({ inserted: count });
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.delete('/api/entries/:id', async (req, res) => {
+try {
+const admin = req.headers['x-admin-token'] || '';
+if (!process.env.ADMIN_TOKEN || admin !== process.env.ADMIN_TOKEN) return res.status(403).json({ error: 'Forbidden' });
+const id = parseInt(req.params.id, 10);
+if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
+const { rowCount } = await pool.query('DELETE FROM entries WHERE id=$1', [id]);
+res.json({ deleted: rowCount });
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.get('/api/swimmers', async (_req, res) => {
+try {
+const { rows } = await pool.query('SELECT swimmer_name, SUM(laps)::int AS total_laps FROM entries GROUP BY swimmer_name ORDER BY total_laps DESC');
+res.json(rows);
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.get('/api/swimmer/:name', async (req, res) => {
+try {
+const name = req.params.name;
+const { rows: entries } = await pool.query('SELECT id, swimmer_name, laps, date, created_at FROM entries WHERE swimmer_name = $1 ORDER BY date DESC, created_at DESC', [name]);
+const total = entries.reduce((s,e)=>s+Number(e.laps),0);
+res.json({ name, total_laps: total, entries });
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.get('/api/stats', async (_req, res) => {
+try {
+const [{ rows: c1 }, { rows: c2 }, { rows: c3 }] = await Promise.all([
+pool.query('SELECT COALESCE(SUM(laps),0)::int AS total_laps FROM entries'),
+pool.query('SELECT COUNT(DISTINCT swimmer_name)::int AS total_swimmers FROM entries'),
+pool.query('SELECT COUNT(*)::int AS total_entries FROM entries'),
+]);
+res.json({ total_laps: c1[0].total_laps, total_swimmers: c2[0].total_swimmers, total_entries: c3[0].total_entries });
+} catch (e) { res.status(500).json({ error: 'Server error' }); }
+});
+
+
+app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+
+
+app.listen(PORT, () => console.log(`API listening on :${PORT}`));
+// backend/setup-database.js
+const { Pool } = require('pg');
+require('dotenv').config();
+
+
+const pool = new Pool({
+connectionString: process.env.DATABASE_URL,
+ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
+
+
+async function setupDatabase() {
+const client = await pool.connect();
+try {
+console.log('Setting up database...');
+await client.query(`
+CREATE TABLE IF NOT EXISTS entries (
+id SERIAL PRIMARY KEY,
+swimmer_name VARCHAR(255) NOT NULL,
+laps INTEGER NOT NULL CHECK (laps > 0),
+date DATE NOT NULL,
+created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_entries_swimmer_name ON entries(swimmer_name);
+CREATE INDEX IF NOT EXISTS idx_entries_date ON entries(date);
+CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at);
+`);
+console.log('Database ready.');
+} catch (e) {
+console.error('Error setting up database:', e);
+process.exit(1);
+} finally {
+client.release();
+await pool.end();
+}
+}
+setupDatabase();
+# backend/.env.example
+DATABASE_URL=postgresql://username:password@localhost:5432/lap_tracker
+NODE_ENV=development
+PORT=3000
+# Add explicit origins in addition to dynamic patterns (comma-separated). Optional.
+# Examples: https://your-user.github.io/your-repo,https://your-api.up.railway.app
+CORS_ORIGINS=
+# Required for bulk import & deletes
+ADMIN_TOKEN=change-me
